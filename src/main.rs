@@ -1,13 +1,36 @@
+/*
+ copyright: (c) 2013-2018 by Blockstack PBC, a public benefit corporation.
+
+ This file is part of Blockstack.
+
+ Blockstack is free software. You may redistribute or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, either version 3 of the License or
+ (at your option) any later version.
+
+ Blockstack is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY, including without the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ GNU General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with Blockstack. If not, see <http://www.gnu.org/licenses/>.
+*/
+
 extern crate rand;
 extern crate bitcoin;
 extern crate ini;
-#[macro_use] extern crate log; 
+extern crate jsonrpc;
+extern crate serde;
+#[macro_use] extern crate serde_derive;
+#[macro_use] extern crate log;
 
 mod burnchains;
 mod util;
 
 use burnchains::indexer::BurnchainIndexer;
-use burnchains::bitcoin::Error as net_error;
+use burnchains::bitcoin::indexer::sync_block_headers;
+use burnchains::bitcoin::Error as btc_error;
 use util::log as logger;
 
 fn main() {
@@ -16,49 +39,12 @@ fn main() {
     let mut bitcoin_indexer = burnchains::bitcoin::indexer::BitcoinIndexer::new();
     bitcoin_indexer.setup("/tmp/test-blockstack-ng").unwrap();
 
-    let mut do_handshake = true;
-
-    loop {
-        if do_handshake {
-            let handshake_result = bitcoin_indexer.connect_handshake_backoff("mainnet");
-            match handshake_result {
-                Ok(()) => {
-                    // connection established!
-                    do_handshake = false;
-                }
-                Err(_) => {
-                    // need to try again 
-                    continue;
-                }
-            }
+    match sync_block_headers(&mut bitcoin_indexer, Some(540000)) {
+        Ok(num_fetched) => {
+            debug!("Fetched {} headers!", num_fetched);
         }
-
-        let msg_result = bitcoin_indexer.recv_message();
-        match msg_result {
-            Ok(msg) => {
-                // got a message, so handle it!
-                let handled = bitcoin_indexer.handle_message(&msg);
-                match handled {
-                    Ok(()) => {},
-                    Err(net_error::UnhandledMessage) => {
-                        debug!("Unhandled message {:?}", msg);
-                    }
-                    Err(net_error::ConnectionBroken) => {
-                        debug!("Re-establish peer connection");
-                        do_handshake = true;
-                    }
-                    Err(e) => {
-                        panic!("Unhandled error while handling {:?}: {:?}", msg, e);
-                    }
-                }
-            }
-            Err(net_error::ConnectionBroken) => {
-                debug!("Re-establish peer connection");
-                do_handshake = true;
-            }
-            Err(e) => {
-                panic!("Unhandled error while receiving a message: {:?}", e);
-            }
+        Err(e) => {
+            error!("Failed to sync headers: {:?}", e);
         }
     }
 }

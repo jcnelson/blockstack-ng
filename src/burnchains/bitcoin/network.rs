@@ -1,22 +1,20 @@
 /*
-    Blockstack
-    ~~~~~
-    copyright: (c) 2014-2015 by Halfmoon Labs, Inc.
-    copyright: (c) 2016-2018 by Blockstack.org
+ copyright: (c) 2013-2018 by Blockstack PBC, a public benefit corporation.
 
-    This file is part of Blockstack
+ This file is part of Blockstack.
 
-    Blockstack is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+ Blockstack is free software. You may redistribute or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, either version 3 of the License or
+ (at your option) any later version.
 
-    Blockstack is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-    You should have received a copy of the GNU General Public License
-    along with Blockstack. If not, see <http://www.gnu.org/licenses/>.
+ Blockstack is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY, including without the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ GNU General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with Blockstack. If not, see <http://www.gnu.org/licenses/>.
 */
 
 use std::time::{UNIX_EPOCH, SystemTime};
@@ -28,19 +26,22 @@ use std::thread;
 
 use rand::{Rng, thread_rng};
 
+use bitcoin::blockdata::block::{BlockHeader, LoneBlockHeader};
 use bitcoin::network::address as btc_network_address;
 use bitcoin::network::constants as btc_constants;
-use bitcoin::network::encodable::{ConsensusEncodable, ConsensusDecodable};
+use bitcoin::network::encodable::{ConsensusEncodable, ConsensusDecodable, VarInt};
 use bitcoin::network::message as btc_message;
 use bitcoin::network::message_network as btc_message_network;
+use bitcoin::network::message_blockdata as btc_message_blockdata;
 use bitcoin::network::serialize as btc_serialize;
-use bitcoin::network::serialize::{RawEncoder, RawDecoder};
+use bitcoin::network::serialize::{RawEncoder, RawDecoder, BitcoinHash};
 use bitcoin::util::hash::Sha256dHash;
 
-use burnchains::bitcoin::Error as net_error;
+use burnchains::bitcoin::Error as btc_error;
 use burnchains::bitcoin::indexer::BitcoinIndexer;
 use burnchains::bitcoin::spv;
 use burnchains::indexer::BurnchainIndexer;
+use burnchains::bitcoin::messages::BitcoinMessageHandler;
 
 // Borrowed from Andrew Poelstra's rust-bitcoin library.
 /// Lock the socket in the BitcoinIndexer's runtime state and do something with it.
@@ -53,7 +54,7 @@ macro_rules! with_socket(($s:ident, $sock:ident, $body:block) => ({
     let sock_lock = $s.socket_locked();
     match sock_lock {
         Err(_) => {
-            Err(net_error::SocketMutexPoisoned.into())
+            Err(btc_error::SocketMutexPoisoned.into())
         }
         Ok(mut guard) => {
             match *guard.deref_mut() {
@@ -61,7 +62,7 @@ macro_rules! with_socket(($s:ident, $sock:ident, $body:block) => ({
                     $body
                 }
                 None => {
-                    Err(net_error::SocketNotConnectedToPeer.into())
+                    Err(btc_error::SocketNotConnectedToPeer.into())
                 }
             }
         }
@@ -72,7 +73,7 @@ impl BitcoinIndexer {
     
     // Based on Andrew Poelstra's rust-bitcoin library.
     /// Send a Bitcoin protocol message on the wire
-    pub fn send_message(&mut self, payload: btc_message::NetworkMessage) -> Result<(), net_error> {
+    pub fn send_message(&mut self, payload: btc_message::NetworkMessage) -> Result<(), btc_error> {
         let message = btc_message::RawNetworkMessage {
             magic: self.runtime.magic,
             payload: payload 
@@ -80,14 +81,14 @@ impl BitcoinIndexer {
 
         with_socket!(self, sock, {
             message.consensus_encode(&mut RawEncoder::new(&mut *sock))
-                .map_err(net_error::SerializationError)?;
-            sock.flush().map_err(net_error::Io)
+                .map_err(btc_error::SerializationError)?;
+            sock.flush().map_err(btc_error::Io)
         })
     }
 
     /// Receive a Bitcoin protocol message on the wire
     /// If this method returns Err(ConnectionBroken), then the caller should attempt to re-connect.
-    pub fn recv_message(&mut self) -> Result<btc_message::NetworkMessage, net_error> {
+    pub fn recv_message(&mut self) -> Result<btc_message::NetworkMessage, btc_error> {
         let magic = self.runtime.magic;
 
         with_socket!(self, sock, {
@@ -100,21 +101,21 @@ impl BitcoinIndexer {
                     match e {
                         btc_serialize::Error::Io(ref io_error) => {
                             if io_error.kind() == io::ErrorKind::UnexpectedEof {
-                                net_error::ConnectionBroken
+                                btc_error::ConnectionBroken
                             }
                             else {
-                                net_error::Io(io::Error::new(io_error.kind(), "I/O error when processing message"))
+                                btc_error::Io(io::Error::new(io_error.kind(), "I/O error when processing message"))
                             }
                         }
                         _ => {
-                            net_error::SerializationError(e)
+                            btc_error::SerializationError(e)
                         }
                     }
                 })?;
 
             // sanity check -- must match our network 
             if decoded.magic != magic {
-                return Err(net_error::InvalidMagic);
+                return Err(btc_error::InvalidMagic);
             }
 
             Ok(decoded.payload)
@@ -122,28 +123,28 @@ impl BitcoinIndexer {
     }
 
     /// Get sender address from our socket 
-    pub fn get_local_sockaddr(&mut self) -> Result<SocketAddr, net_error> {
+    pub fn get_local_sockaddr(&mut self) -> Result<SocketAddr, btc_error> {
         with_socket!(self, sock, {
             match sock.local_addr() {
                 Ok(addr) => {
                     return Ok(addr);
                 }
                 Err(e) => {
-                    return Err(net_error::Io(e));
+                    return Err(btc_error::Io(e));
                 }
             }
         })
     }
 
     /// Get receiver address from our socket 
-    pub fn get_remote_sockaddr(&mut self) -> Result<SocketAddr, net_error> {
+    pub fn get_remote_sockaddr(&mut self) -> Result<SocketAddr, btc_error> {
         with_socket!(self, sock, {
             match sock.peer_addr() {
                 Ok(addr) => {
                     return Ok(addr);
                 }
                 Err(e) => {
-                    return Err(net_error::Io(e));
+                    return Err(btc_error::Io(e));
                 }
             }
         })
@@ -151,28 +152,39 @@ impl BitcoinIndexer {
 
     /// Handle a message we received, if we can.
     /// Returns UnhandledMessage if we can't handle the given message.
-    pub fn handle_message(&mut self, message: &btc_message::NetworkMessage) -> Result<(), net_error> {
+    pub fn handle_message<T: BitcoinMessageHandler>(&mut self, message: &btc_message::NetworkMessage, handler: Option<&mut T>) -> Result<bool, btc_error> {
         match *message {
             btc_message::NetworkMessage::Version(ref msg_body) => {
                 self.handle_version(message)
+                    .and_then(|_r| Ok(true))
             }
             btc_message::NetworkMessage::Verack => {
                 self.handle_verack(message)
+                    .and_then(|_r| Ok(true))
             }
             btc_message::NetworkMessage::Ping(ref nonce) => {
                 self.handle_ping(message)
+                    .and_then(|_r| Ok(true))
             }
             btc_message::NetworkMessage::Pong(ref nonce) => {
                 self.handle_pong(message, *nonce)
+                    .and_then(|_r| Ok(true))
             }
             _ => {
-                Err(net_error::UnhandledMessage)
+                match handler {
+                    Some(mut custom_handler) => {
+                        custom_handler.handle_message(self, message)
+                    }
+                    None => {
+                        Err(btc_error::UnhandledMessage)
+                    }
+                }
             }
         }
     }
 
     /// Do the initial handshake to the remote peer
-    pub fn peer_handshake(&mut self) -> Result<(), net_error> {
+    pub fn peer_handshake(&mut self) -> Result<(), btc_error> {
         debug!("Begin peer handshake to {}:{}", self.config.peer_host, self.config.peer_port);
         self.send_version()?;
         let version_reply = self.recv_message()?;
@@ -189,7 +201,7 @@ impl BitcoinIndexer {
     /// Connect to a remote peer, do a handshake with the remote peer, and use exponential backoff until we
     /// succeed in establishing a connection.
     /// This method masks ConnectionBroken errors, but does not mask other network errors.
-    pub fn connect_handshake_backoff(&mut self, network_name: &str) -> Result<(), net_error> {
+    pub fn connect_handshake_backoff(&mut self, network_name: &str) -> Result<(), btc_error> {
         let mut backoff: f64 = 0.0;
         let mut rng = thread_rng();
 
@@ -204,7 +216,7 @@ impl BitcoinIndexer {
                             // connected!
                             return handshake_result;
                         }
-                        Err(net_error::ConnectionBroken) => {
+                        Err(btc_error::ConnectionBroken) => {
                             // need to try again
                             backoff = 2.0 * backoff + (backoff * rng.gen_range(0.0, 1.0));
                         }
@@ -236,7 +248,7 @@ impl BitcoinIndexer {
     }
 
     /// Send a Version message 
-    pub fn send_version(&mut self) -> Result<(), net_error> {
+    pub fn send_version(&mut self) -> Result<(), btc_error> {
         let timestamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(dur) => dur,
             Err(err) => err.duration(),
@@ -265,7 +277,7 @@ impl BitcoinIndexer {
     }
 
     /// Receive a Version message and reply with a Verack
-    pub fn handle_version(&mut self, version_message: &btc_message::NetworkMessage) -> Result<(), net_error> {
+    pub fn handle_version(&mut self, version_message: &btc_message::NetworkMessage) -> Result<(), btc_error> {
         match *version_message {
             btc_message::NetworkMessage::Version(ref msg_body) => {
                 debug!("Handle version");
@@ -273,13 +285,13 @@ impl BitcoinIndexer {
             }
             _ => {
                 error!("Did not receive version, but got {:?}", *version_message);
-                return Err(net_error::InvalidMessage);
+                return Err(btc_error::InvalidMessage);
             }
         }
     }
 
     /// Send a verack 
-    pub fn send_verack(&mut self) -> Result<(), net_error> {
+    pub fn send_verack(&mut self) -> Result<(), btc_error> {
         let payload = btc_message::NetworkMessage::Verack;
 
         debug!("Send verack");
@@ -288,7 +300,7 @@ impl BitcoinIndexer {
 
     /// Handle a verack we received.
     /// Does nothing.
-    pub fn handle_verack(&mut self, verack_message: &btc_message::NetworkMessage) -> Result<(), net_error> {
+    pub fn handle_verack(&mut self, verack_message: &btc_message::NetworkMessage) -> Result<(), btc_error> {
         match *verack_message {
             btc_message::NetworkMessage::Verack => {
                 debug!("Handle verack");
@@ -296,13 +308,13 @@ impl BitcoinIndexer {
             }
             _ => {
                 error!("Did not receive verack, but got {:?}", *verack_message);
-                return Err(net_error::InvalidMessage);
+                return Err(btc_error::InvalidMessage);
             }
         }
     }
 
     /// Send a ping message 
-    pub fn send_ping(&mut self, nonce: u64) -> Result<(), net_error> {
+    pub fn send_ping(&mut self, nonce: u64) -> Result<(), btc_error> {
         let payload = btc_message::NetworkMessage::Ping(nonce);
 
         debug!("Send ping {} to {}:{}", nonce, self.config.peer_host, self.config.peer_port);
@@ -310,7 +322,7 @@ impl BitcoinIndexer {
     }
 
     /// Respond to a Ping message by sending a Pong message 
-    pub fn handle_ping(&mut self, ping_message: &btc_message::NetworkMessage) -> Result<(), net_error> {
+    pub fn handle_ping(&mut self, ping_message: &btc_message::NetworkMessage) -> Result<(), btc_error> {
         match *ping_message {
             btc_message::NetworkMessage::Ping(ref n) => {
                 debug!("Handle ping {}", *n);
@@ -321,18 +333,18 @@ impl BitcoinIndexer {
             }
             _ => {
                 error!("Did not receive ping, but got {:?}", *ping_message);
-                return Err(net_error::InvalidMessage);
+                return Err(btc_error::InvalidMessage);
             }
         }
     }
     
     /// Respond to a Pong message.
     /// Does nothing.
-    pub fn handle_pong(&mut self, pong_message: &btc_message::NetworkMessage, expected_nonce: u64) -> Result<(), net_error> {
+    pub fn handle_pong(&mut self, pong_message: &btc_message::NetworkMessage, expected_nonce: u64) -> Result<(), btc_error> {
         match *pong_message {
             btc_message::NetworkMessage::Pong(ref n) => {
                 if expected_nonce != *n {
-                    return Err(net_error::InvalidReply);
+                    return Err(btc_error::InvalidReply);
                 }
 
                 debug!("Handle pong {}", *n);
@@ -340,34 +352,19 @@ impl BitcoinIndexer {
             }
             _ => {
                 error!("Did not receive pong, but got {:?}", *pong_message);
-                return Err(net_error::InvalidReply);
+                return Err(btc_error::InvalidReply);
             }
         }
     }
 
-    /*
     /// Send a GetHeaders message
     /// Note that this isn't a generic GetHeaders message -- you should use this only to ask
     /// for a batch of 2,000 block hashes after this given hash.
-    pub fn send_getheaders(&mut self, prev_block_hash: Sha256dHash) -> Result<(), net_error> {
-        let payload = btc_message::NetworkMessage::GetHeaders::New(vec![prev_block_hash], prev_block_hash);
+    pub fn send_getheaders(&mut self, prev_block_hash: Sha256dHash) -> Result<(), btc_error> {
+        let getheaders = btc_message_blockdata::GetHeadersMessage::new(vec![prev_block_hash], prev_block_hash);
+        let payload = btc_message::NetworkMessage::GetHeaders(getheaders);
 
         debug!("Send GetHeaders {} to {}:{}", prev_block_hash.be_hex_string(), self.config.peer_host, self.config.peer_port);
         return self.send_message(payload);
     }
-
-    /// Handle a Headers message
-    pub fn handle_headers(&mut self, headers_message: &btc_message::NetworkMessage) -> Result<(), net_error> {
-        match *headers_message {
-            btc_message::NetworkedMessage::Headers(ref block_headers) => {
-                debug!("Handle Headers {}-{}", block_headers.get(0).header.merkle_root.be_hex_string(), block_headers.get(-1).header.merkle_root.be_hex_string());
-                return spv::add_block_headers(self, block_headers);
-            }
-            _ => {
-                error!("Did not receive Headers, but got {:?}", *headers_message);
-                return Err(net_error::InvalidReply);
-            }
-        }
-    }
-    */
 }

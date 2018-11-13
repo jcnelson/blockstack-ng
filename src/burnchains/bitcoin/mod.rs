@@ -1,22 +1,20 @@
 /*
-    Blockstack
-    ~~~~~
-    copyright: (c) 2014-2015 by Halfmoon Labs, Inc.
-    copyright: (c) 2016-2018 by Blockstack.org
+ copyright: (c) 2013-2018 by Blockstack PBC, a public benefit corporation.
 
-    This file is part of Blockstack
+ This file is part of Blockstack.
 
-    Blockstack is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+ Blockstack is free software. You may redistribute or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, either version 3 of the License or
+ (at your option) any later version.
 
-    Blockstack is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-    You should have received a copy of the GNU General Public License
-    along with Blockstack. If not, see <http://www.gnu.org/licenses/>.
+ Blockstack is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY, including without the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ GNU General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with Blockstack. If not, see <http://www.gnu.org/licenses/>.
 */
 
 // This module is concerned with the implementation of the BitcoinIndexer
@@ -25,6 +23,7 @@
 pub mod messages;
 pub mod indexer;
 pub mod network;
+pub mod rpc;
 pub mod spv;
 
 use std::fmt;
@@ -32,6 +31,8 @@ use std::io;
 use std::error;
 
 use bitcoin::network::serialize::Error as btc_serialize_error;
+use bitcoin::util::hash::HexError as btc_hex_error;
+use jsonrpc::Error as jsonrpc_error;
 
 // Borrowed from Andrew Poelstra's rust-bitcoin 
 
@@ -59,7 +60,17 @@ pub enum Error {
     /// Connection is broken and ought to be re-established
     ConnectionBroken,
     /// general filesystem error
-    FilesystemError(io::Error)
+    FilesystemError(io::Error),
+    /// Hashing error
+    HashError(btc_hex_error),
+    /// Non-contiguous header 
+    NoncontiguousHeader,
+    /// Missing header
+    MissingHeader,
+    /// Invalid target 
+    InvalidPoW,
+    /// RPC error with bitcoin 
+    JSONRPCError(jsonrpc_error)
 }
 
 impl fmt::Display for Error {
@@ -74,7 +85,12 @@ impl fmt::Display for Error {
             Error::UnhandledMessage => f.write_str(error::Error::description(self)),
             Error::NotImplemented => f.write_str(error::Error::description(self)),
             Error::ConnectionBroken => f.write_str(error::Error::description(self)),
-            Error::FilesystemError(ref e) => fmt::Display::fmt(e, f)
+            Error::FilesystemError(ref e) => fmt::Display::fmt(e, f),
+            Error::HashError(ref e) => fmt::Display::fmt(e, f),
+            Error::NoncontiguousHeader => f.write_str(error::Error::description(self)),
+            Error::MissingHeader => f.write_str(error::Error::description(self)),
+            Error::InvalidPoW => f.write_str(error::Error::description(self)),
+            Error::JSONRPCError(ref e) => fmt::Display::fmt(e, f)
         }
     }
 }
@@ -91,7 +107,12 @@ impl error::Error for Error {
             Error::UnhandledMessage => None,
             Error::NotImplemented => None,
             Error::ConnectionBroken => None,
-            Error::FilesystemError(ref e) => Some(e)
+            Error::FilesystemError(ref e) => Some(e),
+            Error::HashError(ref e) => Some(e),
+            Error::NoncontiguousHeader => None,
+            Error::MissingHeader => None,
+            Error::InvalidPoW => None,
+            Error::JSONRPCError(ref e) => Some(e)
         }
     }
 
@@ -107,7 +128,12 @@ impl error::Error for Error {
             Error::UnhandledMessage => "unable to handle message",
             Error::NotImplemented => "functionality not implemented",
             Error::ConnectionBroken => "connection to peer node is broken",
-            Error::FilesystemError(ref e) => e.description()
+            Error::FilesystemError(ref e) => e.description(),
+            Error::HashError(ref e) => e.description(),
+            Error::NoncontiguousHeader => "Non-contiguous header",
+            Error::MissingHeader => "Missing header",
+            Error::InvalidPoW => "Invalid proof of work",
+            Error::JSONRPCError(ref e) => e.description()
         }
     }
 }
